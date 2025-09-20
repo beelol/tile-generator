@@ -1,414 +1,455 @@
-import {hr,html, br,} from "./web-js-utils.js"
-import {Bootstrap} from "./bs_utils.js"
-import {voronoi_app} from "./voronoi_app.js"
-import {Grid} from "./scale-grid.js"
+import { Delaunay } from "https://cdn.jsdelivr.net/npm/d3-delaunay@6/+esm";
+import { createNoise3D } from "https://cdn.jsdelivr.net/npm/simplex-noise@4.0.1/+esm";
 
-const b = document.body
-let vor = new voronoi_app()
-let bs = new Bootstrap()
-let grid = new Grid(b,120)
-let col_svg = null
-let menu = {}
+const canvas = document.getElementById("voronoi-canvas");
+const ctx = canvas.getContext("2d");
+const noiseCanvas = document.getElementById("noise-canvas");
+const noiseCtx = noiseCanvas.getContext("2d");
+const addTileBtn = document.getElementById("add-tile");
+const toggleElevationBtn = document.getElementById("toggle-elevation");
+const toggleNoiseBtn = document.getElementById("toggle-noise");
+const exportBtn = document.getElementById("export-json");
 
-function show_unit(){
-    if(vor.use_unit){
-        const width_unit = vor.width / vor.unit_ratio
-        const height_unit = vor.height / vor.unit_ratio
-        document.getElementById("l_width").innerHTML = `View width (${width_unit.toFixed(2)})`
-        document.getElementById("l_height").innerHTML = `View height (${height_unit.toFixed(2)})`
-    }else{
-        document.getElementById("l_width").innerHTML =  "View width"
-        document.getElementById("l_height").innerHTML = "View height"
+const BALLOON_SCALE = 160;
+const CIRCLE_RADIUS = 14;
+const HANDLE_RADIUS = 10;
+const LABEL_OFFSET = 20;
+
+let centers = [];
+let voronoi = null;
+let selectedId = null;
+let dragging = null;
+let elevationOnly = false;
+let noiseVisible = false;
+let hueCycle = 0;
+let noiseGenerator = createNoise3D();
+
+function randomHue() {
+  hueCycle += 137.508; // golden ratio increment for even spacing
+  return hueCycle % 360;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function resizeCanvases() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const noiseRect = noiseCanvas.getBoundingClientRect();
+  noiseCanvas.width = noiseRect.width * dpr;
+  noiseCanvas.height = noiseRect.height * dpr;
+  noiseCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  recomputeVoronoi();
+  render();
+  if (noiseVisible) {
+    renderNoisePreview();
+  }
+}
+
+function addTile() {
+  const id = `tile-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const label = `Tile ${centers.length + 1}`;
+  const center = {
+    id,
+    label,
+    hue: randomHue(),
+    x: Math.random(),
+    y: Math.random(),
+    elevation: Math.random(),
+  };
+  centers.push(center);
+  selectedId = id;
+  recomputeVoronoi();
+  render();
+  if (noiseVisible) {
+    renderNoisePreview();
+  }
+}
+
+function removeSelectedTile() {
+  if (!selectedId) return;
+  const index = centers.findIndex((c) => c.id === selectedId);
+  if (index >= 0) {
+    centers.splice(index, 1);
+    selectedId = null;
+    recomputeVoronoi();
+    render();
+    if (noiseVisible) {
+      renderNoisePreview();
     }
+  }
 }
 
-function menu_shape(parent){
-    let [col_sampling,col_display] = bs.cols(parent,2)
-    html(col_sampling,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Shape</h5>`)
+function recomputeVoronoi() {
+  if (centers.length === 0) {
+    voronoi = null;
+    return;
+  }
+  const points = centers.map((c) => [c.x * canvas.width, c.y * canvas.height]);
+  if (points.length === 1) {
+    voronoi = null;
+    return;
+  }
+  const delaunay = Delaunay.from(points);
+  voronoi = delaunay.voronoi([0, 0, canvas.width, canvas.height]);
+}
 
-    function view_shape_menu(visible){
-        $("#hd_shape_display")[0].style.visibility = visible?"visible":"hidden"
-        $("#rgg_map")[0].style.visibility = visible?"visible":"hidden"
-        $("#rgg_shape")[0].style.visibility = visible?"visible":"hidden"
-        $("#cbx_shape")[0].style.visibility = visible?"visible":"hidden"
-        grid.resize(parent,visible?240:120,240)
+function getShade(elevation) {
+  return 50 + elevation * 50;
+}
+
+function getElevationGray(elevation) {
+  const pct = 20 + elevation * 60;
+  return `hsl(0, 0%, ${pct}%)`;
+}
+
+function drawVoronoi() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+
+  if (centers.length === 1) {
+    const [center] = centers;
+    const shade = getShade(center.elevation);
+    ctx.fillStyle = elevationOnly
+      ? getElevationGray(center.elevation)
+      : `hsl(${center.hue}, 50%, ${shade}%)`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  } else if (voronoi) {
+    centers.forEach((center, index) => {
+      const polygon = voronoi.cellPolygon(index);
+      if (!polygon) return;
+      ctx.beginPath();
+      ctx.moveTo(polygon[0][0], polygon[0][1]);
+      for (let i = 1; i < polygon.length; i += 1) {
+        ctx.lineTo(polygon[i][0], polygon[i][1]);
+      }
+      ctx.closePath();
+      const shade = getShade(center.elevation);
+      ctx.fillStyle = elevationOnly
+        ? getElevationGray(center.elevation)
+        : `hsl(${center.hue}, 50%, ${shade}%)`;
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
+
+  centers.forEach((center) => {
+    drawCenter(center);
+  });
+
+  ctx.restore();
+}
+
+function drawCenter(center) {
+  const x = center.x * canvas.width;
+  const y = center.y * canvas.height;
+  const shade = getShade(center.elevation);
+  const fillStyle = elevationOnly
+    ? getElevationGray(center.elevation)
+    : `hsl(${center.hue}, 50%, ${shade}%)`;
+
+  // Balloon stalk
+  const height = center.elevation * BALLOON_SCALE;
+  ctx.strokeStyle = "rgba(255,255,255,0.6)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x, y - height);
+  ctx.stroke();
+
+  // Handle
+  ctx.beginPath();
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  ctx.arc(x, y - height, HANDLE_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Center circle
+  ctx.beginPath();
+  ctx.fillStyle = fillStyle;
+  ctx.strokeStyle = center.id === selectedId ? "#ffffff" : "rgba(255,255,255,0.5)";
+  ctx.lineWidth = center.id === selectedId ? 3 : 1.5;
+  ctx.arc(x, y, CIRCLE_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Label background
+  ctx.font = "14px/1.4 'Segoe UI', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  const labelY = y + LABEL_OFFSET;
+  const metrics = ctx.measureText(center.label);
+  const paddingX = 12;
+  const paddingY = 6;
+  const textWidth = metrics.width;
+  const rectWidth = textWidth + paddingX * 2;
+  const rectHeight = 20;
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  ctx.fillRect(x - rectWidth / 2, labelY - paddingY / 2, rectWidth, rectHeight);
+  ctx.fillStyle = "#f9f9f9";
+  ctx.fillText(center.label, x, labelY);
+}
+
+function render() {
+  drawVoronoi();
+}
+
+function pickTile(pos) {
+  let closest = null;
+  let bestDist = Infinity;
+  centers.forEach((center) => {
+    const dx = pos.x - center.x * canvas.width;
+    const dy = pos.y - center.y * canvas.height;
+    const dist = Math.hypot(dx, dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      closest = center;
     }
-
-    let list = ["circle","cell","clear"]
-    bs.dropdown(col_sampling,"Select",list,list,(e)=>{
-        const selected = e.target.getAttribute("data-label")
-        vor.update({path_file:e.target.getAttribute("data-label")})
-        view_shape_menu((selected!="clear"))
-    })
-
-    let rg_list = vor.shape.seeds_action_list
-    let sact_index = rg_list.findIndex((shape)=>{return (shape == vor.shape.config.seeds_action)})
-    let rg_seeds = bs.radio_group(col_sampling,"rgg_map",rg_list,sact_index)
-    rg_seeds.forEach((el)=>{$(el).change((e)=>{vor.update({shape_seeds:e.target.getAttribute("data-label")})})})
-
-    html(col_display,/*html*/`<h5 id="hd_shape_display" style="margin-bottom:5px;color:#1F7BFD">Display</h5>`)
-    rg_list = vor.shape.cells_action_list
-    sact_index = rg_list.findIndex((shape)=>{return (shape == vor.shape.config.cells_action)})
-    let rg_cells = bs.radio_group(col_display,"rgg_shape",rg_list,sact_index)
-    rg_cells.forEach((el)=>{$(el).change((e)=>{vor.update({shape_cells:e.target.getAttribute("data-label")})})})
-
-    bs.checkbox_group(col_sampling,"cbx_shape",["visible"],[vor.shape.config.view_shape],(e)=>{
-        vor.update({view_shape:e.target.checked})
-    })
-    view_shape_menu(false)
+  });
+  return bestDist <= CIRCLE_RADIUS + 8 ? closest : null;
 }
 
-function menu_map(parent){
-    let [col_sel,col_cost] = bs.cols(parent,2)
+function pickHandle(pos) {
+  return centers.find((center) => {
+    const x = center.x * canvas.width;
+    const y = center.y * canvas.height - center.elevation * BALLOON_SCALE;
+    const dist = Math.hypot(pos.x - x, pos.y - y);
+    return dist <= HANDLE_RADIUS + 6;
+  });
+}
 
-    html(col_sel,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Map</h5>`)
+function handlePointerDown(event) {
+  const rect = canvas.getBoundingClientRect();
+  const pos = {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+  const handle = pickHandle(pos);
+  if (handle) {
+    dragging = { type: "elevation", center: handle };
+    selectedId = handle.id;
+    render();
+    return;
+  }
 
-    function view_map_menu(visible){
-        $("#cbx_map")[0].style.visibility = visible?"visible":"hidden"
-        $("#map_cost_group")[0].style.visibility = visible?"visible":"hidden"
-        grid.resize(parent,visible?360:120,240)
+  const tile = pickTile(pos);
+  if (tile) {
+    dragging = { type: "position", center: tile, offsetX: pos.x - tile.x * canvas.width, offsetY: pos.y - tile.y * canvas.height };
+    selectedId = tile.id;
+  } else {
+    selectedId = null;
+  }
+  render();
+}
+
+function handlePointerMove(event) {
+  if (!dragging) return;
+  event.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const pos = {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+
+  if (dragging.type === "position") {
+    const { center, offsetX, offsetY } = dragging;
+    center.x = clamp((pos.x - offsetX) / canvas.width, 0, 1);
+    center.y = clamp((pos.y - offsetY) / canvas.height, 0, 1);
+    recomputeVoronoi();
+    render();
+  } else if (dragging.type === "elevation") {
+    const { center } = dragging;
+    const height = clamp((center.y * canvas.height - pos.y) / BALLOON_SCALE, 0, 1);
+    center.elevation = height;
+    render();
+  }
+  if (noiseVisible) {
+    renderNoisePreview();
+  }
+}
+
+function handlePointerUp() {
+  dragging = null;
+}
+
+function handleDoubleClick(event) {
+  const rect = canvas.getBoundingClientRect();
+  const pos = {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+  const tile = pickTile(pos);
+  if (!tile) return;
+  const newLabel = prompt("Tile label", tile.label);
+  if (newLabel && newLabel.trim().length > 0) {
+    tile.label = newLabel.trim();
+    if (!tile.id || tile.id.startsWith("tile-")) {
+      const baseId = tile.label.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9\-]/g, "");
+      tile.id = baseId || `tile-${Date.now()}`;
     }
-
-    let list = ["grad_hor","center","grad_vert_up_down","spiral_1","spiral_2","conical","clear"]
-    bs.dropdown(col_sel,"Select",list,list,(e)=>{
-        const selected = e.target.getAttribute("data-label")
-        vor.update({map:selected,w:vor.width,h:vor.height})
-        view_map_menu((selected!="clear"))
-    })
-
-
-    bs.checkbox_group(col_sel,"cbx_map",["visible"],[vor.shape.config.view_map],(e)=>{
-        vor.update({view_map:e.target.checked})
-    })
-
-
-    let scfg = vor.seeds.config
-    let div_map_cost = html(col_cost,/*html*/`<div id="map_cost_group"></div>`)
-    html(div_map_cost,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Map Paramters</h5>`)
-    let label_cost = html(div_map_cost,/*html*/`<a style="margin:5px">Cost Vs Dist ${scfg.map_vs_dist}</a>`)
-    let rg_cost = bs.input_range(div_map_cost,scfg.map_vs_dist_max,scfg.map_vs_dist)
-    $(rg_cost).on("input",(e)=>{
-        label_cost.innerHTML = `Map Cost Vs Dist ${rg_cost.value}`
-        vor.update({map_vs_dist:rg_cost.value})
-    })
-    let label_power = html(div_map_cost,/*html*/`<a style="margin:5px">Cost Power ${scfg.map_power}</a>`)
-    let rg_map = bs.input_range(div_map_cost,scfg.map_power_range.max,scfg.map_power)
-    rg_map.min = scfg.map_power_range.min
-    rg_map.step = scfg.map_power_range.step
-    $(rg_map).on("input",(e)=>{
-        label_power.innerHTML = `Cost Power ${rg_map.value}`
-        vor.update({map_power:rg_map.value})
-    })
-
-    view_map_menu(false)
-}
-
-function menu_export(ecol0,ecol1){
-    let btn_save_svg = bs.button(ecol0,"btn_save",`export SVG`);
-
-    let btn_save_data = bs.button(ecol0,"btn_save",`export seeds coordinates`);
-
-    html(ecol1,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Export</h5>`)
-    const lst = vor.export_svg
-    const export_states = [lst.cells,lst.edges,lst.seeds]
-    bs.checkbox_group(ecol1,"cbx_export",["cells","edges","seeds"],export_states,(e)=>{
-                            vor.export_svg[e.target.getAttribute("data-name")] = e.target.checked
-                        })
-
-
-
-    $(btn_save_svg).click(()=>{
-        vor.save_svg("voronoi_svg_export.svg")
-    })
-
-    $(btn_save_data).click(()=>{
-        vor.save_seeds("seeds.json")
-    })
-}
-
-function menu_github_version(parent){
-    html(parent,/*html*/`<a>
-        <p align="center">
-            <a href="https://github.com/WebSVG/voronoi" target="_blank">
-            <img src=./github.png width=40 href="https://github.com/WebSVG/voronoi">
-            <p align="center">User Guide and Source Code</p>
-        </p>
-    </a>`)
-    html(parent,/*html*/`<p align="center">v10.08.2022</p>`)
-}
-
-function menu_shape_space_min(parent){
-    html(parent,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Cells shape</h5>`)
-    const cells_shapes = ["edges","quadratic","cubic"]
-    const shape_index = cells_shapes.findIndex((shape)=>{return (shape == vor.cells_shape)})
-    let rg_groups = bs.radio_group(parent,"shapes",cells_shapes,shape_index)
-
-    let pr = html(parent,/*html*/`<p style="margin-top:10px"></p>`)
-    let space_label = html(pr,/*html*/`<a style="margin-top:10px">Space between cells ${vor.cells_space}</a>`)
-    let rg_space = bs.input_range(pr,30)
-    rg_space.step = 0.2
-    rg_space.value = vor.cells_space
-
-    let pr2 = html(parent,/*html*/`<p style="margin-top:10px"></p>`)
-    let in_label = html(pr2,/*html*/`<a >min cell edge ${vor.min_edge}</a>`)
-    const max_min_cell_edge = 100
-    let rg_min_edge = bs.input_range(pr2,max_min_cell_edge)
-    rg_min_edge.value = vor.min_edge
-
-    let rg_debug = bs.input_range(pr2,vor.seeds.config.nb_seeds)
-    rg_debug.value = 0
-
-    if(vor.cells_shape == "cubic"){
-        in_label.style.visibility = "visible"
-        rg_min_edge.style.visibility = "visible"
-    }else{
-        in_label.style.visibility = "hidden"
-        rg_min_edge.style.visibility = "hidden"
+    selectedId = tile.id;
+    render();
+    if (noiseVisible) {
+      renderNoisePreview();
     }
-
-    rg_groups.forEach((el)=>{
-        $(el).change((e)=>{
-            vor.cells_shape = e.target.getAttribute("data-label")
-            vor.draw()
-            if(vor.cells_shape == "cubic"){
-                in_label.style.visibility = "visible"
-                rg_min_edge.style.visibility = "visible"
-            }else{
-                in_label.style.visibility = "hidden"
-                rg_min_edge.style.visibility = "hidden"
-            }
-        })
-    })
-
-    $(rg_space).on("input",(e)=>{
-        vor.cells_space = rg_space.value
-        space_label.innerHTML = `Space between cells ${vor.cells_space}`
-        vor.draw()
-    })
-    $(rg_min_edge).on("input",(e)=>{
-        vor.min_edge = rg_min_edge.value
-        in_label.innerHTML = `min cell edge ${vor.min_edge}`
-        vor.draw()
-    })
-    $(rg_debug).on("input",(e)=>{
-        vor.update({cell_debug:rg_debug.value})
-    })
+  }
 }
 
-function menu_generate_view(parent){
-    let btn_seeds = bs.button(parent,"btn_seed",`generate`);
-    const lst = vor.view_svg
-    const view_states = [lst.cells,lst.edges,lst.seeds]
-    bs.checkbox_group(parent,"cbx_view",["cells","edges","seeds"],view_states,(e)=>{
-                            vor.view_svg[e.target.getAttribute("data-name")] = e.target.checked
-                            vor.draw()
-                        })
-    $(btn_seeds).click((e)=>{
-        vor.update_seeds({clear:true})//clear = true
-    })
-
+function handleKeyDown(event) {
+  if (event.key === "Delete" || event.key === "Backspace") {
+    removeSelectedTile();
+  }
 }
 
-function menu_nb_seeds(parent){
-    let scfg = vor.seeds.config
-    html(parent,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Seeds</h5>`)
-    //html(parent,/*html*/`<a style="margin:10px">Seeds Number</a>`)
-    let in_nb_seeds = bs.input_text(parent,"in_nb_seed",`${scfg.nb_seeds} seeds`,"w-100");
-    let rg_nb_seeds = bs.input_range(parent,scfg.max_seeds)
-    rg_nb_seeds.value = scfg.nb_seeds
-    let in_max_seeds = bs.input_text(parent,"in_max_seed",`set to increase max seeds, ${scfg.max_seeds}`,"w-100");
+function toggleElevationMode() {
+  elevationOnly = !elevationOnly;
+  toggleElevationBtn.classList.toggle("active", elevationOnly);
+  toggleElevationBtn.textContent = elevationOnly ? "Show Tile Colors" : "Toggle Elevation Mode";
+  render();
+  if (noiseVisible) {
+    renderNoisePreview();
+  }
+}
 
-    $(rg_nb_seeds).on("input",(e)=>{
-        in_nb_seeds.value = rg_nb_seeds.value
-        vor.update_seeds({nb_seeds:rg_nb_seeds.value})
-    })
+function toggleNoisePreview() {
+  noiseVisible = !noiseVisible;
+  toggleNoiseBtn.classList.toggle("active", noiseVisible);
+  toggleNoiseBtn.textContent = noiseVisible ? "Hide Noise Map" : "Generate Noise Map";
+  if (noiseVisible) {
+    noiseGenerator = createNoise3D();
+    renderNoisePreview();
+  } else {
+    noiseCtx.clearRect(0, 0, noiseCanvas.width, noiseCanvas.height);
+  }
+}
 
-    $(in_nb_seeds).change(()=>{
-        let update = {}
-        if(in_nb_seeds.value > scfg.max_seeds){
-            rg_nb_seeds.max = in_nb_seeds.value
-            rg_nb_seeds.value = in_nb_seeds.value
-            update.max_seeds = in_nb_seeds.value
-            in_max_seeds.setAttribute("placeholder",`max seeds ${update.max_seeds}`)
-            in_max_seeds.value = null
+function renderNoisePreview() {
+  if (!noiseVisible) return;
+  const width = noiseCanvas.width;
+  const height = noiseCanvas.height;
+  if (width === 0 || height === 0) return;
+  const imageData = noiseCtx.createImageData(width, height);
+  const data = imageData.data;
+  const freq = 2.8;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const nx = x / width;
+      const ny = y / height;
+      const temp = (noiseGenerator(nx * freq, ny * freq, 0) + 1) * 0.5;
+      const moist = (noiseGenerator(nx * freq, ny * freq, 100) + 1) * 0.5;
+      const elev = (noiseGenerator(nx * freq, ny * freq, 200) + 1) * 0.5;
+      const tileId = getTileAt(temp, moist, elev);
+      const tile = centers.find((c) => c.id === tileId);
+      let color;
+      if (tile) {
+        if (elevationOnly) {
+          const gray = getElevationGray(tile.elevation);
+          const match = gray.match(/(\d+(?:\.\d+)?)%/);
+          const pct = match ? parseFloat(match[1]) : 50;
+          const val = Math.round((pct / 100) * 255);
+          color = [val, val, val];
+        } else {
+          const shade = getShade(tile.elevation);
+          color = hslToRgb(tile.hue, 0.5, shade / 100);
         }
-        rg_nb_seeds.value = in_nb_seeds.value
-        update.nb_seeds = rg_nb_seeds.value
-        vor.update_seeds(update)
-    })
-    $(in_max_seeds).change(()=>{
-        rg_nb_seeds.max = in_max_seeds.value
-        vor.update_seeds({max_seeds:in_max_seeds.value})
-    })
-
-}
-
-function menu_sampling(parent){
-    let scfg = vor.seeds.config
-    html(parent,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Sampling</h5>`)
-    let toggle_walls = bs.toggle(parent,"walls away","walls stick")
-    toggle_walls.checked = scfg.walls_dist
-    let in_sampling  = bs.input_text(parent,"in_nb_samples",`${scfg.nb_samples} samples`,"w-100");
-
-    $(toggle_walls).change(()=>{
-        vor.update_seeds({clear:true,walls_dist:toggle_walls.checked})
-    })
-    $(in_sampling).change(()=>{
-        vor.update_seeds({clear:true,nb_samples:in_sampling.value})
-    })
-
-}
-
-function menu_scale(parent){
-    let main_cb_update = (e)=>{}
-    bs.checkbox_group(parent,"cbx_scale",["show_unit"],[vor.use_unit],(e)=>{main_cb_update(e)})
-    let in_ratio = bs.input_text(parent,"in_ratio","Enter unit ratio","w-100");
-    
-    in_ratio.value = vor.unit_ratio
-    function set_visibility(vis){
-        in_ratio.style.visibility = vis?"visible":"hidden"
-        show_unit()
+      } else {
+        color = [20, 20, 20];
+      }
+      const index = (x + y * width) * 4;
+      data[index] = color[0];
+      data[index + 1] = color[1];
+      data[index + 2] = color[2];
+      data[index + 3] = 255;
     }
-    set_visibility(vor.use_unit)
-    main_cb_update = (e)=>{
-        vor.use_unit = e.target.checked
-        vor.store()
-        set_visibility(e.target.checked)
+  }
+
+  noiseCtx.putImageData(imageData, 0, 0);
+}
+
+function hslToRgb(h, s, l) {
+  const hue = ((h % 360) + 360) % 360 / 360;
+  let r, g, b;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, hue + 1 / 3);
+    g = hue2rgb(p, q, hue);
+    b = hue2rgb(p, q, hue - 1 / 3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+function hue2rgb(p, q, t) {
+  let tt = t;
+  if (tt < 0) tt += 1;
+  if (tt > 1) tt -= 1;
+  if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+  if (tt < 1 / 2) return q;
+  if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+  return p;
+}
+
+function exportJson() {
+  if (!centers.length) return;
+  const payload = centers.map(({ id, label, x, y, elevation }) => ({ id, label, x, y, elevation }));
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  if (window.saveAs) {
+    window.saveAs(blob, "tile-centers.json");
+  } else {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tile-centers.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
+function init() {
+  window.addEventListener("resize", resizeCanvases);
+  window.addEventListener("keydown", handleKeyDown);
+  canvas.addEventListener("pointerdown", handlePointerDown);
+  window.addEventListener("pointermove", handlePointerMove);
+  window.addEventListener("pointerup", handlePointerUp);
+  canvas.addEventListener("dblclick", handleDoubleClick);
+  addTileBtn.addEventListener("click", addTile);
+  toggleElevationBtn.addEventListener("click", toggleElevationMode);
+  toggleNoiseBtn.addEventListener("click", toggleNoisePreview);
+  exportBtn.addEventListener("click", exportJson);
+
+  resizeCanvases();
+  // start with a couple of tiles for context
+  for (let i = 0; i < 3; i += 1) {
+    addTile();
+  }
+}
+
+function getTileAt(temp, moist, elev) {
+  let nearest = null;
+  let bestDist = Infinity;
+  centers.forEach((c) => {
+    const dx = temp - c.x;
+    const dy = moist - c.y;
+    const dz = elev - c.elevation;
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d < bestDist) {
+      bestDist = d;
+      nearest = c;
     }
-    $(in_ratio).change((e)=>{
-        if(in_ratio.value == ""){
-            in_ratio.value = vor.unit_ratio_default
-        }
-        vor.unit_ratio = in_ratio.value
-        vor.store()
-        show_unit()
-    })
+  });
+  return nearest ? nearest.id : null;
 }
 
-function menu_size(parent){
-    html(parent,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Size</h5>`)
-    let scfg = vor.seeds.config
-    html(parent,/*html*/`<a id="l_width" style="margin-bottom:5px">View width</a>`)
-    let in_width = bs.input_text(parent,"in_width",`width`,"w-100");
-    in_width.value = vor.width
-    html(parent,/*html*/`<a id="l_height" style="margin-bottom:5px">View height</a>`)
-    let in_height = bs.input_text(parent,"in_height",`height`,"w-100");
-    in_height.value = vor.height
+window.getTileAt = getTileAt;
 
-    $(in_width).change(()=>{
-        vor.resize(in_width.value,in_height.value)
-        grid.resize(menu.svg_grid_div,in_width.value,in_height.value)
-        show_unit()
-    })
-
-    $(in_height).change(()=>{
-        vor.resize(in_width.value,in_height.value)
-        grid.resize(menu.svg_grid_div,in_width.value,in_height.value)
-        show_unit()
-    })
-
-    menu.in_width = in_width
-    menu.in_height = in_height
-    menu_scale(parent)
-}
-
-function menu_color(parent){
-    html(parent,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Color</h5>`)
-    let btn_color = bs.button(parent,"btn_color",`randomize colors`);
-
-    $(btn_color).click(()=>{
-        document.querySelectorAll("path").forEach(function(userPath) {
-            userPath.setAttribute("fill", "hsl("+ Math.floor(Math.random() * Math.floor(255)) + ",90%,60%)");
-            userPath.setAttribute("fill-opacity", "40%");
-        })  
-        
-    })
-    
-}
-
-function menu_mouse(parent){
-    html(parent,/*html*/`<h5 style="margin-bottom:5px;color:#1F7BFD">Mouse</h5>`)
-    //html(parent,/*html*/`<a style="margin:10px">Mouse</a>`)
-    const actions_array = ["add","move","remove"]
-    const action_index = actions_array.findIndex((action)=>{return (action == vor.mouse_action)})
-    bs.radio_group(parent,"actions",actions_array,action_index,(e)=>{
-        vor.mouse_action = e.target.getAttribute("data-label")
-        vor.store()
-    })
-
-}
-
-function menu_filters(parent){
-    let diag_cfg = vor.diagram.config
-    let main_cb_update = (e)=>{}
-    bs.checkbox_group(parent,"cbx_filters",["use_filters"],[diag_cfg.use_filters],(e)=>{main_cb_update(e)})
-    let label_disp_scale = html(parent,/*html*/`<a style="margin:5px">Displacement scale ${diag_cfg.disp_scale}</a>`)
-    let rg_disp = bs.input_range(parent,diag_cfg.disp_scale_max,diag_cfg.disp_scale)
-    $(rg_disp).on("input",(e)=>{
-        label_disp_scale.innerHTML = `Displacement scale ${rg_disp.value}`
-        vor.update({displacement:rg_disp.value})
-    })
-
-    let label_freq = html(parent,/*html*/`<a style="margin:5px">Turbulence Frequency ${diag_cfg.turb_freq}</a>`)
-    let rg_freq = bs.input_range(parent,diag_cfg.turb_freq_max,diag_cfg.turb_freq)
-    rg_freq.step = diag_cfg.turb_freq_step
-    $(rg_freq).on("input",(e)=>{
-        label_freq.innerHTML = `Turbulence Frequency ${rg_freq.value}`
-        vor.update({turbulence:rg_freq.value})
-    })
-
-    function set_visibility(vis){
-        label_disp_scale.style.visibility = vis?"visible":"hidden"
-        rg_disp.style.visibility = vis?"visible":"hidden"
-        label_freq.style.visibility = vis?"visible":"hidden"
-        rg_freq.style.visibility = vis?"visible":"hidden"
-    }
-
-    set_visibility(diag_cfg.use_filters)
-    main_cb_update = (e)=>{
-        vor.update({filters:e.target.checked})
-        set_visibility(e.target.checked)
-    }
-}
-
-function main(){
-
-    menu.svg_grid_div = grid.get_div({width:vor.width,height:vor.height})
-    vor.set_parent_only(menu.svg_grid_div)
-    menu_generate_view(  grid.get_div({width:120,height:120}))
-    menu_nb_seeds(       grid.get_div({width:240,height:120}))
-    menu_sampling(       grid.get_div({width:120,height:120}))
-    menu_mouse(          grid.get_div({width:120,height:240}))
-    menu_color(          grid.get_div({width:120,height:240}))
-    menu_size(          grid.get_div({width:180,height:240}))
-    menu_shape_space_min(grid.get_div({width:240,height:240}))
-
-    let col_exp_buttons = grid.get_div({width:240,height:120})
-    let col_exp_select = grid.get_div({width:120,height:120})
-    menu_export(col_exp_buttons,col_exp_select)
-
-    menu_shape(grid.get_div({width:120,height:240}))
-    menu_map(grid.get_div({width:120,height:240}))
-
-    menu_filters(grid.get_div({width:240,height:120}))
-    menu_github_version(grid.get_div({width:240,height:120}))
-
-    grid.apply()
-
-    vor.update_seeds({clear:true,width:vor.width,height:vor.height})
-
-    window.addEventListener("main_window",onMainWindow,false)
-}
-
-function onMainWindow(e){
-    const width = e.detail.width
-    const height = e.detail.height
-    menu.in_width.value = width
-    menu.in_height.value = height
-    vor.resize(width,height,{clear:false})
-    grid.resize(col_svg,width,height)
-}
-
-
-main();
-
+init();
